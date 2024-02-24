@@ -1,0 +1,274 @@
+#!/usr/bin/python
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import List
+from dateutil.parser import parse as parse_date
+import argparse
+from jsonpickle import encode, decode
+from playsound import playsound
+from tabulate import tabulate
+
+ACTIONS = ["work", "pause", "flip", "today", "monitor", "stats"]
+DEFAULT_WORK = 90
+DEFAULT_SHORT_PAUSE = 8
+DEFAULT_LONG_PAUSE = 20
+DEFAULT_STATS_LEN = 4
+
+CURRENT_PATH = '/home/nemanja/workspace/pomodoro/current'
+STATS_PATH = '/home/nemanja/workspace/pomodoro/stats'
+DONE_SOUND = "/home/nemanja/workspace/pomodoro/bell.wav"
+
+parser = argparse.ArgumentParser()
+parser.add_argument('action', choices=ACTIONS, type=str)
+parser.add_argument('-l', action='store', default=None, dest="length")
+args = parser.parse_args()
+
+@dataclass
+class Session:
+	name: str = "pause"
+	started_at: datetime = datetime.now()
+	ending_at: datetime = datetime.now()
+
+def to_json_line(s:Session):
+	return encode(s, unpicklable=False)
+
+def to_json(s:Session):
+	return encode(s, unpicklable=False, indent=4)
+
+def parse_session(str_data:str)->Session:
+	try: 
+		s = Session(**decode(str_data))
+		s.started_at = parse_date(s.started_at)
+		s.ending_at = parse_date(s.ending_at)
+		return s
+	except Exception as e:
+		print(f"Failed to parse:{str_data} because of: {e}")
+		return Session()
+
+def get_pause(len: int):
+	now = datetime.now()
+	return Session(name='pause',
+			started_at=now,
+			ending_at=now + timedelta(minutes=len))
+
+def get_work(len: int):
+	now = datetime.now()
+	return Session(name='work',
+			started_at=now,
+			ending_at=now + timedelta(minutes=len))
+
+def save_work(work_obj: Session):
+	stat_file = open(STATS_PATH, "a+")
+
+	work_obj.ending_at = datetime.now()
+	stat_file.write("\n") # new line
+	stat_file.write(to_json_line(work_obj))
+
+	stat_file.close()
+
+def was_today(date: datetime)->bool:
+	return date.date() == datetime.now().date()
+
+def filter_day(all: List[Session], days_ago: int=0)->List[Session]:
+	filtered = []
+
+	target_date = (datetime.now() - timedelta(days=days_ago)).date()
+	ind = len(all)-1
+
+	while ind>=0 and all[ind].started_at.date() >= target_date:
+		if all[ind].started_at.date() == target_date:
+			filtered.insert(0, all[ind])
+
+		ind -= 1
+
+	return filtered
+
+def format_session(s:Session)->List[str]:
+	from_t = s.started_at
+	to_t = s.ending_at
+
+	from_s = from_t.strftime("%H:%M")
+	to_s = to_t.strftime("%H:%M")
+
+	secs = (to_t - from_t).seconds
+	
+	mins = int(secs/60)
+	hs = int(mins/60)
+
+	return [f"from: {from_s}", f"to: {to_s}", f"{hs}:{mins%60}"]
+	# return f"from: {from_s} to: {to_s} => {hs}:{mins%60}"
+
+def sum_sessions(s_list: List[Session])->str:
+
+	sum = 0
+	for s in s_list: 
+		sum += (s.ending_at-s.started_at).seconds
+
+	mins = int(sum/60)
+	hs = int(mins/60)
+
+	return f"{hs}:{mins%60}"
+
+def get_day_str(before:int)->str:
+
+	target_day = datetime.now() - timedelta(days=before)
+	day = target_day.weekday()
+
+	if day == 0:
+		return "MONDAY"
+	elif day == 1: 
+		return "TUESDAY"
+	elif day == 2: 
+		return "WEDNESDAY"
+	elif day == 3: 
+		return "THURSDAY"
+	elif day == 4: 
+		return "FRIDAY"
+	elif day == 5: 
+		return "SATURDAY"
+	elif day == 6: 
+		return "SUNDAY"
+
+	return "UNKNOWN"
+
+# ACTIONS	
+
+def start_work():
+	len = DEFAULT_WORK if args.length is None else args.length
+
+	print("Starting work.")
+	data_file = open(CURRENT_PATH, 'r+')
+	content = data_file.read()
+	data_file.close()
+
+	current_session:Session = parse_session(content)
+
+	if current_session.name == "work":
+		save_work(current_session)
+
+	new_session = get_work(len)
+
+	data_file = open(CURRENT_PATH, "w+")
+	data_file.write(to_json(new_session))
+	data_file.close()
+
+def start_pause():
+	len = DEFAULT_SHORT_PAUSE if args.length is None else args.length
+
+	print("Starting pause.")
+	data_file = open(CURRENT_PATH,'r+')
+	content = data_file.read()	
+	data_file.close()
+
+	current_session = parse_session(content)
+	if current_session.name != "work":
+		print("Already on pause.")
+		return 
+
+	save_work(current_session)
+	
+	new_session = get_pause(len)
+
+	data_file = open(CURRENT_PATH, "w+")
+	data_file.write(to_json(new_session))
+	data_file.close()
+
+	return
+
+def flip():
+	print("Fliping.")
+
+	data_file = open(CURRENT_PATH, 'r+')
+	content = data_file.read()
+	data_file.close()
+
+	current_session = parse_session(content)
+
+	if current_session.name == 'work':
+		start_pause()
+	else:
+		start_work()
+
+def monitor():
+	file = open(CURRENT_PATH, "r+")
+	content = file.read()
+	file.close()
+
+	current_session = parse_session(content)
+
+	now = datetime.now()
+	ending_at = current_session.ending_at
+	if now < ending_at:
+		diff = (ending_at-datetime.now()).seconds
+		sign = ""
+	else:
+		diff = (datetime.now()-ending_at).seconds
+		sign = "+"
+
+	if sign == '+' and diff<5:
+		playsound(DONE_SOUND)
+
+	mins = round(diff/60, ndigits=1)
+
+	status = current_session.name
+	print(f"{status}: {sign} {mins} mins")
+
+def today():
+	f = open(STATS_PATH,"r+")
+	lines = f.readlines()
+	f.close()
+
+	sec_sum = 0
+	sessions = [parse_session(line) for line in lines]
+	rows = []
+
+	for session in filter_day(sessions):
+		seconds = (session.ending_at - session.started_at).seconds
+		sec_sum += seconds
+
+		rows.append(format_session(session))
+
+	total_h = int(sec_sum / 60 / 60)
+	total_mins = int(sec_sum / 60) % 60
+
+	rows.append(["","","-----"])
+	rows.append(["","",f"{total_h}:{total_mins}"])
+
+	print(tabulate(rows))
+
+def stats():
+	len = DEFAULT_STATS_LEN if args.length is None else int(args.length)
+
+	f = open(STATS_PATH, 'r+')
+	lines = f.readlines()
+	f.close()
+
+	sessions = [parse_session(line) for line in lines]
+	rows = []
+	for days_old in range(len-1, -1, -1):
+		filtered = filter_day(sessions, days_old)
+
+		day_str =  get_day_str(days_old)
+		sum_str = sum_sessions(filtered)
+
+		rows.append([day_str,sum_str])
+		
+	print(tabulate(rows))
+
+	return 
+
+if args.action == 'work':
+	start_work()
+elif args.action =='pause':
+	start_pause()
+elif args.action == 'flip':
+	flip()
+elif args.action == 'today':
+	today()
+elif args.action == 'monitor':
+	monitor()
+elif args.action == 'stats':
+	stats()
+else:
+	print("Unknown action.")
